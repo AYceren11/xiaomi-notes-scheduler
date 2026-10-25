@@ -1,0 +1,29 @@
+# Visual Studio / .NET
+**/bin/
+**/obj/
+**/appsettings.Development.json
+*.db
+*.db-shm
+*.db-wal
+*.user
+
+# Flutter / Dart
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/build/
+**/ephemeral/
+.packages
+
+# Android
+**/.gradle/
+**/local.properties
+**/GeneratedPluginRegistrant.java
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Backups
+*_yedek.*
