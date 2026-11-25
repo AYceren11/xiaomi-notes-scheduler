@@ -1,39 +1,65 @@
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import '../models/note.dart';
-import '../models/task_item.dart';
 import '../models/category.dart';
+import '../models/note.dart';
+import '../models/schedule_item.dart';
+import '../models/task_item.dart';
 import '../models/user.dart';
+import 'storage_service.dart';
+
+class ApiResult<T> {
+  final T? data;
+  final String? error;
+  bool get isSuccess => error == null && data != null;
+
+  ApiResult.success(this.data) : error = null;
+  ApiResult.failure(this.error) : data = null;
+}
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
   ApiService._internal();
 
-  late final Dio _dio;
+  final StorageService _storage = StorageService();
+  late Dio _dio;
+  String? _customBaseUrl;
+  String? _authToken;
+  UserItem? currentUser;
+  bool _initialized = false;
 
-  // Base URL: 10.0.2.2 is host loopback for Android Emulator, localhost for Windows/Web
-  String get baseUrl {
-    if (kIsWeb) return 'http://localhost:5000/api';
+  String get defaultBaseUrl {
+    if (kIsWeb) return 'http://localhost:5186/api';
     return defaultTargetPlatform == TargetPlatform.android
-        ? 'http://10.0.2.2:5000/api'
-        : 'http://localhost:5000/api';
+        ? 'http://10.0.2.2:5186/api'
+        : 'http://localhost:5186/api';
   }
 
-  UserItem? currentUser;
-  String? _authToken;
+  String get baseUrl => (_customBaseUrl != null && _customBaseUrl!.isNotEmpty)
+      ? _customBaseUrl!
+      : defaultBaseUrl;
 
-  // Local state cache for offline/standalone execution
-  List<Note> _localNotes = [];
-  List<TaskItem> _localTasks = [];
-  List<CategoryItem> _localCategories = [];
+  /// Root host without `/api` suffix for static uploaded audio files
+  String get hostRoot {
+    final url = baseUrl;
+    if (url.endsWith('/api')) {
+      return url.substring(0, url.length - 4);
+    }
+    return url;
+  }
 
-  void init() {
+  Future<void> init() async {
+    if (_initialized) return;
+    _customBaseUrl = await _storage.getCustomApiUrl();
+    _authToken = await _storage.getToken();
+    currentUser = await _storage.getSavedUser();
+
     _dio = Dio(
       BaseOptions(
         baseUrl: baseUrl,
-        connectTimeout: const Duration(seconds: 4),
-        receiveTimeout: const Duration(seconds: 4),
+        connectTimeout: const Duration(seconds: 6),
+        receiveTimeout: const Duration(seconds: 8),
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
@@ -41,363 +67,397 @@ class ApiService {
       ),
     );
 
-    _seedInitialData();
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          options.baseUrl = baseUrl;
+          if (_authToken != null && _authToken!.isNotEmpty) {
+            options.headers['Authorization'] = 'Bearer $_authToken';
+          }
+          handler.next(options);
+        },
+      ),
+    );
+
+    _initialized = true;
   }
 
-  void _seedInitialData() {
-    _localCategories = [
-      CategoryItem(id: 1, userId: 1, name: 'Önemli', colorCode: '#FF6900', icon: 'star'),
-      CategoryItem(id: 2, userId: 1, name: 'İş', colorCode: '#2196F3', icon: 'work'),
-      CategoryItem(id: 3, userId: 1, name: 'Kişisel', colorCode: '#4CAF50', icon: 'person'),
-      CategoryItem(id: 4, userId: 1, name: 'Dersler', colorCode: '#9C27B0', icon: 'book'),
-    ];
-
-    _localNotes = [
-      Note(
-        id: 1,
-        userId: 1,
-        categoryId: 1,
-        title: '⚡ Xiaomi Hızlı Not & Zamanlayıcı',
-        contentJson: '• Sol kenardaki turuncu çubuktan diğer uygulamaların üzerinde hızlıca not ve görev ekleyebilirsiniz.\n• Görevler tamamlandığında silinmez, üstü çizili kalır.\n• Görevlerin sırasını değiştirebilir ve bir görevi başka bir görevin altına alt görev olarak taşıyabilirsiniz.\n• 24 saatlik dikey zaman matrisinde görevlerinizi saatlere sürükleyebilirsiniz.',
-        colorHex: '#FFF9E6',
-        isPinned: true,
-        isVault: false,
-        createdAt: DateTime.now().subtract(const Duration(hours: 5)),
-        updatedAt: DateTime.now().subtract(const Duration(minutes: 10)),
-      ),
-      Note(
-        id: 2,
-        userId: 1,
-        categoryId: 4,
-        title: 'BLM4587 Dönem Projesi Mimarisi',
-        contentJson: 'Backend: ASP.NET Core 8 Web API + PostgreSQL + EF Core Code-First.\nFrontend: Flutter (Dart) + Dio.\nKimlik Doğrulama: JWT Token tabanlı (Admin ve User rolleri).\nÖzellikler: Zengin metin düzenleyici, 24 saatlik ajanda, şifreli kasa.',
-        colorHex: '#E3F2FD',
-        isPinned: true,
-        isVault: false,
-        createdAt: DateTime.now().subtract(const Duration(days: 1)),
-        updatedAt: DateTime.now().subtract(const Duration(hours: 2)),
-      ),
-      Note(
-        id: 3,
-        userId: 1,
-        categoryId: 3,
-        title: 'Kitap & Makale Önerileri',
-        contentJson: '1. Clean Architecture - Robert C. Martin\n2. Flutter Apprentice\n3. Microservices in .NET Core\n4. Database System Concepts',
-        colorHex: '#E8F5E9',
-        isPinned: false,
-        isVault: false,
-        createdAt: DateTime.now().subtract(const Duration(days: 2)),
-        updatedAt: DateTime.now().subtract(const Duration(days: 1)),
-      ),
-    ];
-
-    _localTasks = [
-      TaskItem(
-        id: 1,
-        userId: 1,
-        title: 'Proje mimarisinin kurulması ve Web API uç noktaları',
-        isCompleted: true,
-        priority: 'Yüksek',
-        dueDate: DateTime.now().add(const Duration(days: 2)),
-        createdAt: DateTime.now().subtract(const Duration(days: 1)),
-        completedAt: DateTime.now(),
-      ),
-      TaskItem(
-        id: 2,
-        userId: 1,
-        title: 'Flutter arayüz tasarımı ve Xiaomi MIUI teması',
-        isCompleted: false,
-        priority: 'Yüksek',
-        dueDate: DateTime.now().add(const Duration(days: 3)),
-        createdAt: DateTime.now(),
-        subtasks: [
-          TaskItem(
-            id: 21,
-            userId: 1,
-            parentId: 2,
-            title: 'Not kartları ve Masonry grid düzeni',
-            isCompleted: true,
-            createdAt: DateTime.now(),
-          ),
-          TaskItem(
-            id: 22,
-            userId: 1,
-            parentId: 2,
-            title: '24 saatlik zamanlayıcı matrisi',
-            isCompleted: false,
-            createdAt: DateTime.now(),
-          ),
-        ],
-      ),
-      TaskItem(
-        id: 3,
-        userId: 1,
-        title: 'Haftalık Alışveriş Listesi',
-        isCompleted: false,
-        priority: 'Orta',
-        dueDate: DateTime.now().add(const Duration(days: 1)),
-        createdAt: DateTime.now(),
-      ),
-    ];
+  Future<void> setBaseUrl(String rawUrl) async {
+    var cleaned = rawUrl.trim();
+    if (cleaned.isEmpty) {
+      _customBaseUrl = null;
+      await _storage.saveCustomApiUrl(null);
+      _dio.options.baseUrl = baseUrl;
+      return;
+    }
+    if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+      cleaned = 'http://$cleaned';
+    }
+    if (cleaned.endsWith('/')) {
+      cleaned = cleaned.substring(0, cleaned.length - 1);
+    }
+    if (!cleaned.endsWith('/api')) {
+      cleaned = '$cleaned/api';
+    }
+    _customBaseUrl = cleaned;
+    await _storage.saveCustomApiUrl(cleaned);
+    _dio.options.baseUrl = cleaned;
   }
 
-  // --- Auth ---
-  Future<UserItem?> login(String email, String password) async {
+  Future<bool> testConnection() async {
     try {
-      final response = await _dio.post('/auth/login', data: {
-        'email': email,
+      final res = await _dio.get('/health');
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String resolveMediaUrl(String pathOrUrl) {
+    if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+      return pathOrUrl;
+    }
+    if (pathOrUrl.startsWith('/')) {
+      return '$hostRoot$pathOrUrl';
+    }
+    return pathOrUrl;
+  }
+
+  String _extractError(Object e, String fallback) {
+    if (e is DioException) {
+      final data = e.response?.data;
+      if (data is Map) {
+        if (data['message'] != null) return data['message'].toString();
+        if (data['errors'] is Map) {
+          final errs = (data['errors'] as Map).values
+              .expand((v) => v is List ? v : [v])
+              .map((v) => v.toString())
+              .join('\n');
+          if (errs.isNotEmpty) return errs;
+        }
+        if (data['title'] != null) return data['title'].toString();
+      }
+      if (e.response?.statusCode == 401) {
+        return 'Oturum geçersiz veya yetkisiz erişim (401).';
+      }
+      if (e.response?.statusCode == 403) {
+        return 'Bu işlem için Yönetici (Admin) yetkisi gereklidir (403).';
+      }
+      if (e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.receiveTimeout) {
+        return 'Web API sunucusuna bağlanılamadı ($baseUrl).\nLütfen API sunucusunun çalıştığından ve IP adresinin doğru olduğundan emin olun.';
+      }
+    }
+    return fallback;
+  }
+
+  // ==================== AUTH ====================
+
+  Future<ApiResult<UserItem>> login(String email, String password) async {
+    try {
+      final res = await _dio.post('/auth/login', data: {
+        'email': email.trim(),
         'password': password,
       });
-      if (response.statusCode == 200) {
-        currentUser = UserItem.fromJson(response.data);
-        _authToken = currentUser?.token;
-        _dio.options.headers['Authorization'] = 'Bearer $_authToken';
-        return currentUser;
-      }
-    } catch (_) {
-      currentUser = UserItem(
-        id: email.contains('admin') ? 1 : 2,
-        fullName: email.contains('admin') ? 'Sistem Yöneticisi' : 'Ayşe Ceren Şenel',
-        email: email,
-        role: email.contains('admin') ? 'Admin' : 'User',
-        token: 'mock-jwt-token',
-      );
-      return currentUser;
+      final user = UserItem.fromJson(Map<String, dynamic>.from(res.data));
+      currentUser = user;
+      _authToken = user.token;
+      await _storage.saveSession(user);
+      return ApiResult.success(user);
+    } catch (e) {
+      return ApiResult.failure(_extractError(e, 'Giriş yapılamadı.'));
     }
-    return null;
   }
 
-  Future<UserItem?> register(String fullName, String email, String password, String role) async {
+  Future<ApiResult<UserItem>> register(
+      String fullName, String email, String password, String role) async {
     try {
-      final response = await _dio.post('/auth/register', data: {
-        'fullName': fullName,
-        'email': email,
+      final res = await _dio.post('/auth/register', data: {
+        'fullName': fullName.trim(),
+        'email': email.trim(),
         'password': password,
         'role': role,
       });
-      if (response.statusCode == 200) {
-        currentUser = UserItem.fromJson(response.data);
-        _authToken = currentUser?.token;
-        _dio.options.headers['Authorization'] = 'Bearer $_authToken';
-        return currentUser;
-      }
-    } catch (_) {
-      currentUser = UserItem(
-        id: 2,
-        fullName: fullName,
-        email: email,
-        role: role,
-        token: 'mock-jwt-token',
-      );
-      return currentUser;
+      final user = UserItem.fromJson(Map<String, dynamic>.from(res.data));
+      currentUser = user;
+      _authToken = user.token;
+      await _storage.saveSession(user);
+      return ApiResult.success(user);
+    } catch (e) {
+      return ApiResult.failure(_extractError(e, 'Kayıt başarısız oldu.'));
     }
-    return null;
   }
 
-  // --- Notes CRUD ---
-  Future<List<Note>> getNotes({String? search, int? categoryId}) async {
+  Future<UserItem?> validateSavedSession() async {
+    if (_authToken == null || _authToken!.isEmpty) return null;
     try {
-      final Map<String, dynamic> queryParams = {};
-      if (search != null && search.isNotEmpty) queryParams['search'] = search;
-      if (categoryId != null) queryParams['categoryId'] = categoryId;
-
-      final response = await _dio.get('/notes', queryParameters: queryParams);
-      if (response.statusCode == 200 && response.data is List) {
-        _localNotes = (response.data as List).map((n) => Note.fromJson(n)).toList();
-        return _localNotes;
+      final res = await _dio.get('/auth/me');
+      if (res.statusCode == 200 && res.data is Map) {
+        final data = Map<String, dynamic>.from(res.data);
+        data['token'] = _authToken;
+        currentUser = UserItem.fromJson(data);
+        await _storage.saveSession(currentUser!);
+        return currentUser;
       }
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+        await logout();
+        return null;
+      }
+      // Keep cached user if only temporarily offline
+      return currentUser;
     } catch (_) {
-      // Fallback to cached notes
+      return currentUser;
     }
+    return currentUser;
+  }
 
-    var list = List<Note>.from(_localNotes);
-    if (categoryId != null) {
-      list = list.where((n) => n.categoryId == categoryId).toList();
-    }
-    if (search != null && search.isNotEmpty) {
-      final q = search.toLowerCase();
-      list = list.where((n) => n.title.toLowerCase().contains(q) || n.contentJson.toLowerCase().contains(q)).toList();
-    }
-    list.sort((a, b) {
-      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
-      return b.updatedAt.compareTo(a.updatedAt);
-    });
-    return list;
+  Future<void> logout() async {
+    currentUser = null;
+    _authToken = null;
+    _dio.options.headers.remove('Authorization');
+    await _storage.clearSession();
+  }
+
+  // ==================== NOTES CRUD ====================
+
+  Future<List<Note>> getNotes({String? search, int? categoryId, bool? isVault}) async {
+    final params = <String, dynamic>{};
+    if (search != null && search.trim().isNotEmpty) params['search'] = search.trim();
+    if (categoryId != null) params['categoryId'] = categoryId;
+    if (isVault != null) params['isVault'] = isVault;
+
+    final res = await _dio.get('/notes', queryParameters: params);
+    return (res.data as List).map((n) => Note.fromJson(Map<String, dynamic>.from(n))).toList();
   }
 
   Future<Note> saveNote(Note note) async {
+    final payload = {
+      'title': note.title,
+      'contentJson': note.contentJson,
+      'categoryId': note.categoryId,
+      'colorHex': note.colorHex,
+      'isPinned': note.isPinned,
+      'isVault': note.isVault,
+      'mindMapData': note.mindMapData,
+      'audioUrl': note.audioUrl,
+      'drawingData': note.drawingData,
+    };
+
     if (note.id == 0) {
-      try {
-        final res = await _dio.post('/notes', data: {
-          'title': note.title,
-          'contentJson': note.contentJson,
-          'categoryId': note.categoryId,
-          'colorHex': note.colorHex,
-          'isPinned': note.isPinned,
-          'isVault': note.isVault,
-        });
-        if (res.statusCode == 201 || res.statusCode == 200) {
-          final created = Note.fromJson(res.data);
-          _localNotes.insert(0, created);
-          return created;
-        }
-      } catch (_) {}
-
-      final newNote = note.copyWith(
-        id: DateTime.now().millisecondsSinceEpoch % 100000,
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
-      _localNotes.insert(0, newNote);
-      return newNote;
+      final res = await _dio.post('/notes', data: payload);
+      return Note.fromJson(Map<String, dynamic>.from(res.data));
     } else {
-      try {
-        await _dio.put('/notes/${note.id}', data: {
-          'title': note.title,
-          'contentJson': note.contentJson,
-          'categoryId': note.categoryId,
-          'colorHex': note.colorHex,
-          'isPinned': note.isPinned,
-          'isVault': note.isVault,
-        });
-      } catch (_) {}
-
-      final idx = _localNotes.indexWhere((n) => n.id == note.id);
-      final updated = note.copyWith(updatedAt: DateTime.now());
-      if (idx != -1) {
-        _localNotes[idx] = updated;
-      }
-      return updated;
+      final res = await _dio.put('/notes/${note.id}', data: payload);
+      return Note.fromJson(Map<String, dynamic>.from(res.data));
     }
   }
 
   Future<void> deleteNote(int id) async {
-    try {
-      await _dio.delete('/notes/$id');
-    } catch (_) {}
-    _localNotes.removeWhere((n) => n.id == id);
+    await _dio.delete('/notes/$id');
   }
 
-  Future<void> togglePinNote(int id) async {
-    try {
-      await _dio.patch('/notes/$id/toggle-pin');
-    } catch (_) {}
-    final idx = _localNotes.indexWhere((n) => n.id == id);
-    if (idx != -1) {
-      _localNotes[idx] = _localNotes[idx].copyWith(
-        isPinned: !_localNotes[idx].isPinned,
-        updatedAt: DateTime.now(),
-      );
-    }
+  Future<Note> togglePinNote(int id) async {
+    final res = await _dio.patch('/notes/$id/toggle-pin');
+    return Note.fromJson(Map<String, dynamic>.from(res.data));
   }
 
-  // --- Tasks CRUD ---
-  Future<List<TaskItem>> getTasks() async {
-    try {
-      final response = await _dio.get('/tasks');
-      if (response.statusCode == 200 && response.data is List) {
-        _localTasks = (response.data as List).map((t) => TaskItem.fromJson(t)).toList();
-        return _localTasks;
-      }
-    } catch (_) {}
-    return _localTasks;
+  Future<Note> toggleVaultNote(int id) async {
+    final res = await _dio.patch('/notes/$id/toggle-vault');
+    return Note.fromJson(Map<String, dynamic>.from(res.data));
   }
 
-  Future<TaskItem> createTask(String title, {String priority = 'Orta', DateTime? dueDate, int? parentId}) async {
+  Future<String?> uploadAudio(File file) async {
     try {
-      final res = await _dio.post('/tasks', data: {
-        'title': title,
-        'priority': priority,
-        'dueDate': dueDate?.toIso8601String(),
-        'parentId': parentId,
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(
+          file.path,
+          filename: file.path.split(Platform.pathSeparator).last,
+        ),
       });
-      if (res.statusCode == 201 || res.statusCode == 200) {
-        final t = TaskItem.fromJson(res.data);
-        _localTasks.add(t);
-        return t;
+      final res = await _dio.post('/notes/upload-audio', data: formData);
+      if (res.statusCode == 200 && res.data is Map) {
+        return res.data['audioUrl']?.toString();
       }
     } catch (_) {}
+    return null;
+  }
 
-    final newTask = TaskItem(
-      id: DateTime.now().millisecondsSinceEpoch % 100000,
-      userId: 1,
-      title: title,
-      priority: priority,
-      dueDate: dueDate,
-      parentId: parentId,
-      createdAt: DateTime.now(),
-    );
-    if (parentId != null) {
-      final pIdx = _localTasks.indexWhere((t) => t.id == parentId);
-      if (pIdx != -1) {
-        final p = _localTasks[pIdx];
-        _localTasks[pIdx] = p.copyWith(subtasks: [...p.subtasks, newTask]);
-      }
-    } else {
-      _localTasks.add(newTask);
-    }
-    return newTask;
+  // ==================== CATEGORIES CRUD ====================
+
+  Future<List<CategoryItem>> getCategories() async {
+    final res = await _dio.get('/categories');
+    return (res.data as List)
+        .map((c) => CategoryItem.fromJson(Map<String, dynamic>.from(c)))
+        .toList();
+  }
+
+  Future<CategoryItem> createCategory(String name, {String colorCode = '#FF6900', String icon = 'folder'}) async {
+    final res = await _dio.post('/categories', data: {
+      'name': name.trim(),
+      'colorCode': colorCode,
+      'icon': icon,
+    });
+    return CategoryItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<CategoryItem> updateCategory(int id, String name, {String colorCode = '#FF6900', String icon = 'folder'}) async {
+    final res = await _dio.put('/categories/$id', data: {
+      'name': name.trim(),
+      'colorCode': colorCode,
+      'icon': icon,
+    });
+    return CategoryItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<void> deleteCategory(int id) async {
+    await _dio.delete('/categories/$id');
+  }
+
+  // ==================== TASKS CRUD ====================
+
+  Future<List<TaskItem>> getTasks() async {
+    final res = await _dio.get('/tasks');
+    return (res.data as List)
+        .map((t) => TaskItem.fromJson(Map<String, dynamic>.from(t)))
+        .toList();
+  }
+
+  Future<TaskItem> createTask(
+    String title, {
+    String priority = 'Orta',
+    DateTime? dueDate,
+    int? parentId,
+    int? noteId,
+  }) async {
+    final res = await _dio.post('/tasks', data: {
+      'title': title.trim(),
+      'priority': priority,
+      'dueDate': dueDate?.toUtc().toIso8601String(),
+      'parentId': parentId,
+      'noteId': noteId,
+    });
+    return TaskItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<TaskItem> updateTask(TaskItem task) async {
+    final res = await _dio.put('/tasks/${task.id}', data: {
+      'title': task.title.trim(),
+      'isCompleted': task.isCompleted,
+      'priority': task.priority,
+      'dueDate': task.dueDate?.toUtc().toIso8601String(),
+      'noteId': task.noteId,
+      'parentId': task.parentId,
+      'orderIndex': task.orderIndex,
+    });
+    return TaskItem.fromJson(Map<String, dynamic>.from(res.data));
   }
 
   Future<void> toggleTaskComplete(int id) async {
-    try {
-      await _dio.patch('/tasks/$id/toggle-complete');
-    } catch (_) {}
+    await _dio.patch('/tasks/$id/toggle-complete');
+  }
 
-    for (int i = 0; i < _localTasks.length; i++) {
-      if (_localTasks[i].id == id) {
-        final cur = _localTasks[i];
-        _localTasks[i] = cur.copyWith(isCompleted: !cur.isCompleted);
-        return;
-      }
-      for (int j = 0; j < _localTasks[i].subtasks.length; j++) {
-        if (_localTasks[i].subtasks[j].id == id) {
-          final sub = _localTasks[i].subtasks[j];
-          _localTasks[i].subtasks[j] = sub.copyWith(isCompleted: !sub.isCompleted);
-          return;
-        }
-      }
+  Future<void> reorderTasks(List<TaskItem> orderedTasks) async {
+    final items = <Map<String, dynamic>>[];
+    for (int i = 0; i < orderedTasks.length; i++) {
+      items.add({
+        'id': orderedTasks[i].id,
+        'orderIndex': i,
+        'parentId': orderedTasks[i].parentId,
+      });
     }
+    await _dio.patch('/tasks/reorder', data: {'items': items});
   }
 
   Future<void> deleteTask(int id) async {
-    try {
-      await _dio.delete('/tasks/$id');
-    } catch (_) {}
-    _localTasks.removeWhere((t) => t.id == id);
+    await _dio.delete('/tasks/$id');
   }
 
-  // --- Categories ---
-  Future<List<CategoryItem>> getCategories() async {
-    try {
-      final res = await _dio.get('/categories');
-      if (res.statusCode == 200 && res.data is List) {
-        _localCategories = (res.data as List).map((c) => CategoryItem.fromJson(c)).toList();
-        return _localCategories;
-      }
-    } catch (_) {}
-    return _localCategories;
+  // ==================== SCHEDULES CRUD ====================
+
+  Future<List<ScheduleItem>> getSchedules({DateTime? date, int? year, int? month}) async {
+    final params = <String, dynamic>{};
+    if (date != null) {
+      params['date'] =
+          '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    }
+    if (year != null) params['year'] = year;
+    if (month != null) params['month'] = month;
+
+    final res = await _dio.get('/schedules', queryParameters: params);
+    return (res.data as List)
+        .map((s) => ScheduleItem.fromJson(Map<String, dynamic>.from(s)))
+        .toList();
   }
 
-  // --- Admin ---
+  Future<ScheduleItem> createSchedule(ScheduleItem schedule) async {
+    final res = await _dio.post('/schedules', data: schedule.toRequestJson());
+    return ScheduleItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<ScheduleItem> updateSchedule(ScheduleItem schedule) async {
+    final res = await _dio.put('/schedules/${schedule.id}', data: schedule.toRequestJson());
+    return ScheduleItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<void> deleteSchedule(int id) async {
+    await _dio.delete('/schedules/$id');
+  }
+
+  // ==================== ADMIN & USERS CRUD ====================
+
   Future<Map<String, dynamic>> getAdminStats() async {
-    try {
-      final res = await _dio.get('/admin/stats');
-      if (res.statusCode == 200) {
-        return Map<String, dynamic>.from(res.data);
-      }
-    } catch (_) {}
+    final res = await _dio.get('/admin/stats');
+    return Map<String, dynamic>.from(res.data);
+  }
 
-    return {
-      'totalUsers': 2,
-      'totalNotes': _localNotes.length,
-      'totalTasks': _localTasks.length,
-      'completedTasks': _localTasks.where((t) => t.isCompleted).length,
-      'totalCategories': _localCategories.length,
-      'recentLogs': [
-        {'action': 'SYSTEM_INITIALIZED', 'entityName': 'Database', 'timestamp': DateTime.now().toIso8601String(), 'ipAddress': '127.0.0.1'},
-        {'action': 'LOGIN_SUCCESS', 'entityName': 'User', 'timestamp': DateTime.now().subtract(const Duration(minutes: 5)).toIso8601String(), 'ipAddress': '127.0.0.1'},
-      ]
-    };
+  Future<List<UserItem>> getAdminUsers() async {
+    final res = await _dio.get('/users');
+    return (res.data as List)
+        .map((u) => UserItem.fromJson(Map<String, dynamic>.from(u)))
+        .toList();
+  }
+
+  Future<UserItem> createUser({
+    required String fullName,
+    required String email,
+    required String password,
+    required String role,
+  }) async {
+    final res = await _dio.post('/users', data: {
+      'fullName': fullName.trim(),
+      'email': email.trim(),
+      'password': password,
+      'role': role,
+      'isActive': true,
+    });
+    return UserItem.fromJson(Map<String, dynamic>.from(res.data));
+  }
+
+  Future<void> toggleUserStatus(int userId) async {
+    await _dio.post('/admin/users/$userId/toggle-status');
+  }
+
+  Future<void> changeUserRole(int userId, String newRole) async {
+    await _dio.patch('/admin/users/$userId/role', data: {'role': newRole});
+  }
+
+  Future<void> deleteUser(int userId) async {
+    await _dio.delete('/users/$userId');
+  }
+
+  Future<List<Map<String, dynamic>>> getAdminNotes() async {
+    final res = await _dio.get('/admin/notes');
+    return (res.data as List).map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  Future<void> deleteAdminNote(int noteId) async {
+    await _dio.delete('/admin/notes/$noteId');
+  }
+
+  Future<List<Map<String, dynamic>>> getAuditLogs() async {
+    final res = await _dio.get('/admin/audit-logs');
+    return (res.data as List).map((e) => Map<String, dynamic>.from(e)).toList();
   }
 }
