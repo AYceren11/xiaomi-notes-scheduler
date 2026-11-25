@@ -1,5 +1,7 @@
 using System.Text;
+using System.Text.Json.Serialization;
 using Api.Data;
+using Api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -7,25 +9,23 @@ using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Add DbContext (PostgreSQL as primary, SQLite fallback for offline development)
-var usePostgres = builder.Configuration.GetValue<bool>("UsePostgres");
+// 1. Add DbContext (PostgreSQL + EF Core ORM)
 var pgConn = builder.Configuration.GetConnectionString("PostgreSql");
-var sqliteConn = builder.Configuration.GetConnectionString("SqliteFallback");
+if (string.IsNullOrWhiteSpace(pgConn))
+    pgConn = Environment.GetEnvironmentVariable("ConnectionStrings__PostgreSql");
+if (string.IsNullOrWhiteSpace(pgConn))
+    throw new InvalidOperationException("PostgreSQL bağlantı dizesi tanımlı değil. Lütfen appsettings.Development.json içine 'ConnectionStrings:PostgreSql' ekleyin.");
 
-builder.Services.AddDbContext<AppDbContext>(options =>
-{
-    if (usePostgres && !string.IsNullOrEmpty(pgConn))
-    {
-        options.UseNpgsql(pgConn);
-    }
-    else
-    {
-        options.UseSqlite(sqliteConn ?? "Data Source=xiaominotes.db");
-    }
-});
+builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(pgConn));
 
-// 2. Add JWT Authentication & Roles
-var jwtKey = builder.Configuration["Jwt:Key"] ?? "ThisIsASecretKeyForXiaomiNotesScheduler2026LongEnoughKey!";
+builder.Services.AddScoped<AuditService>();
+
+// 2. Add JWT Authentication & Role-Based Authorization
+var jwtKey = builder.Configuration["Jwt:Key"];
+if (string.IsNullOrWhiteSpace(jwtKey))
+    jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY");
+if (string.IsNullOrWhiteSpace(jwtKey))
+    throw new InvalidOperationException("JWT gizli anahtarı tanımlı değil. Lütfen appsettings.Development.json içine 'Jwt:Key' veya JWT_SECRET_KEY ortam değişkeni ekleyin.");
 var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
 
 builder.Services.AddAuthentication(options =>
@@ -66,10 +66,15 @@ builder.Services.AddCors(options =>
     });
 });
 
-// 4. Add Controllers
-builder.Services.AddControllers();
+// 4. Add Controllers with Cycle-Safe JSON Serialization
+builder.Services.AddControllers()
+    .AddJsonOptions(opts =>
+    {
+        opts.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
+        opts.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+    });
 
-// 5. Add Swagger / OpenAPI with Bearer Auth
+// 5. Add Swagger / OpenAPI with JWT Bearer Auth
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -77,7 +82,7 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title = "Xiaomi Notes & Scheduler API",
         Version = "v1",
-        Description = "BLM4587 Dönem Projesi Web API Katmanı - Xiaomi Notes & Gelişmiş Zamanlayıcı"
+        Description = "BLM4587 Dönem Projesi Web API Katmanı — Notes, Tasks, Schedules, Categories, Users & Admin CRUD"
     });
 
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
@@ -107,7 +112,11 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
-// 6. Seed Database on startup
+// Ensure wwwroot/uploads exists for voice notes
+var uploadsDir = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "uploads", "audio");
+Directory.CreateDirectory(uploadsDir);
+
+// 6. Apply EF Core Migrations & Seed Database on startup
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -122,21 +131,28 @@ using (var scope = app.Services.CreateScope())
 }
 
 // 7. HTTP Request Pipeline
-if (app.Environment.IsDevelopment() || true)
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Xiaomi Notes & Scheduler API v1");
-        c.RoutePrefix = "swagger";
-    });
-}
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Xiaomi Notes & Scheduler API v1");
+    c.RoutePrefix = "swagger";
+});
 
+app.UseStaticFiles();
 app.UseCors("AllowAll");
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// Health check endpoint for quick mobile connection testing
+app.MapGet("/api/health", () => Results.Ok(new
+{
+    status = "ok",
+    service = "Xiaomi Notes & Scheduler API",
+    database = "PostgreSQL",
+    timestamp = DateTime.UtcNow
+}));
 
 app.Run();
